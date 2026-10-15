@@ -178,6 +178,14 @@ export interface NDKConstructorParams {
     signatureVerificationFunction?: (event: NDKEvent) => Promise<boolean>;
 
     /**
+     * With async signature verification (a worker or `signatureVerificationFunction`),
+     * hold each relay event until its signature is verified: it is cached and emitted
+     * only once verified, a forged one never is, and EOSE waits for the events before it.
+     * Off by default, where events are emitted first and checked afterwards.
+     */
+    verifyBeforeEmit?: boolean;
+
+    /**
      * Filter validation mode for subscriptions.
      *
      * @default "validate" - Throws an error when filters contain undefined values
@@ -350,6 +358,8 @@ export class NDK extends EventEmitter<{
     public queuesZapConfig: Queue<NDKLnUrlData | undefined>;
     public queuesNip05: Queue<ProfilePointer | null>;
     public asyncSigVerification = false;
+    /** See {@link NDKConstructorParams.verifyBeforeEmit}. */
+    public verifyBeforeEmit = false;
     public initialValidationRatio = 1.0;
     public lowestValidationRatio = 0.1;
     public validationRatioFn?: NDKValidationRatioFn;
@@ -493,6 +503,7 @@ export class NDK extends EventEmitter<{
         }
 
         // Always set the function if provided, even if a worker is also set
+        this.verifyBeforeEmit = opts.verifyBeforeEmit ?? false;
         if (opts.signatureVerificationFunction) {
             this.signatureVerificationFunction = opts.signatureVerificationFunction;
         }

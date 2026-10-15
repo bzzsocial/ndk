@@ -3,6 +3,7 @@ import { EventEmitter } from "tseep";
 import type { NDKEventId, NDKSignedEvent, NostrEvent } from "../events/index.js";
 import { createSignedEvent, NDKEvent } from "../events/index.js";
 import type { NDKKind } from "../events/kinds/index.js";
+import { verifySignatureAsync } from "../events/signature.js";
 import { verifiedSignatures } from "../events/validation.js";
 import { wrapEvent } from "../events/wrap.js";
 import type { NDK } from "../ndk/index.js";
@@ -888,6 +889,16 @@ export class NDKSubscription extends EventEmitter<{
                         // Set the relay on the event for async verification
                         ndkEvent.relay = relay;
 
+                        if (
+                            this.ndk.asyncSigVerification &&
+                            this.ndk.verifyBeforeEmit &&
+                            verifiedSignatures.get(eventId) !== event.sig
+                        ) {
+                            this.lastEventReceivedAt = Date.now();
+                            this.holdUntilVerified(ndkEvent, relay, eventId, optimisticPublish);
+                            return;
+                        }
+
                         // Attempt verification
                         if (this.ndk.asyncSigVerification) {
                             // Async verification - call verifySignature but don't wait for result
@@ -911,23 +922,9 @@ export class NDKSubscription extends EventEmitter<{
                     }
                 }
 
-                if (this.ndk.cacheAdapter && !this.opts.dontSaveToCache && !kindIsEphemeral(ndkEvent.kind as NDKKind) && !fromCache) {
-                    this.ndk.cacheAdapter.setEvent(ndkEvent, this.filters, relay);
-                }
             }
 
-            // Apply mute filter
-            if (!this.opts.includeMuted && this.ndk.muteFilter && this.ndk.muteFilter(ndkEvent)) {
-                this.debug("Event muted, skipping");
-                return;
-            }
-
-            // emit it
-            if (!optimisticPublish || this.skipOptimisticPublishEvent !== true) {
-                this.emitEvent(this.opts?.wrap ?? false, ndkEvent, relay, fromCache, optimisticPublish);
-                // mark the eventId as seen
-                this.eventFirstSeen.set(eventId, Date.now());
-            }
+            this.deliverEvent(ndkEvent, relay, fromCache, optimisticPublish);
         } else {
             const timeSinceFirstSeen = Date.now() - (this.eventFirstSeen.get(eventId) || 0);
             this.emit("event:dup", event, relay, timeSinceFirstSeen, this, fromCache, optimisticPublish);
@@ -971,6 +968,37 @@ export class NDKSubscription extends EventEmitter<{
         this.lastEventReceivedAt = Date.now();
     }
 
+    /** Caches (relay events), applies the mute filter and emits an accepted event. */
+    private deliverEvent(
+        ndkEvent: NDKEvent,
+        relay: NDKRelay | undefined,
+        fromCache: boolean,
+        optimisticPublish: boolean,
+    ): void {
+        if (
+            !fromCache &&
+            !optimisticPublish &&
+            this.ndk.cacheAdapter &&
+            !this.opts.dontSaveToCache &&
+            !kindIsEphemeral(ndkEvent.kind as NDKKind)
+        ) {
+            this.ndk.cacheAdapter.setEvent(ndkEvent, this.filters, relay);
+        }
+
+        // Apply mute filter
+        if (!this.opts.includeMuted && this.ndk.muteFilter && this.ndk.muteFilter(ndkEvent)) {
+            this.debug("Event muted, skipping");
+            return;
+        }
+
+        // emit it
+        if (!optimisticPublish || this.skipOptimisticPublishEvent !== true) {
+            this.emitEvent(this.opts?.wrap ?? false, ndkEvent, relay, fromCache, optimisticPublish);
+            // mark the eventId as seen
+            this.eventFirstSeen.set(ndkEvent.id as NDKEventId, Date.now());
+        }
+    }
+
     /**
      * Optionally wraps, sync or async, and emits the event (if one comes back from the wrapper)
      */
@@ -999,7 +1027,41 @@ export class NDKSubscription extends EventEmitter<{
     private eoseTimeout: ReturnType<typeof setTimeout> | undefined;
     private eosed = false;
 
+    /** Relay events held until their signature is verified (verifyBeforeEmit). */
+    private pendingVerifications = new Set<Promise<void>>();
+
+    private holdUntilVerified(
+        ndkEvent: NDKEvent,
+        relay: NDKRelay,
+        eventId: NDKEventId,
+        optimisticPublish: boolean,
+    ): void {
+        // Arriving again from another relay while this is checked is a duplicate.
+        this.eventFirstSeen.set(eventId, Date.now());
+        const check = verifySignatureAsync(ndkEvent, true, relay)
+            .catch(() => false)
+            .then((ok) => {
+                if (!ok) {
+                    this.eventFirstSeen.delete(eventId);
+                    verifiedSignatures.set(eventId, false);
+                    this.ndk.reportInvalidSignature(ndkEvent, relay);
+                    return;
+                }
+                ndkEvent.signatureVerified = true;
+                verifiedSignatures.set(eventId, ndkEvent.sig!);
+                relay.addValidatedEvent();
+                this.deliverEvent(ndkEvent, relay, false, optimisticPublish);
+            })
+            .finally(() => this.pendingVerifications.delete(check));
+        this.pendingVerifications.add(check);
+    }
+
     public eoseReceived(relay: NDKRelay): void {
+        // Events that arrived before this EOSE come first.
+        if (this.pendingVerifications.size > 0) {
+            Promise.allSettled(Array.from(this.pendingVerifications)).then(() => this.eoseReceived(relay));
+            return;
+        }
         this.eosesSeen.add(relay);
         this.emit("relay:eose", relay, this);
 

@@ -554,6 +554,33 @@ export class NDKNip46Signer extends EventEmitter implements NDKSigner {
     }
 
     /**
+     * Restores an already-approved bunker session without sending a new `connect` request
+     * (which some bunkers prompt the user to approve again). Returns synchronously; the
+     * subscription for the bunker's responses starts in the background.
+     */
+    public static restore(
+        ndk: NDK,
+        session: {
+            localSigner: NDKPrivateKeySigner | string;
+            bunkerPubkey: string;
+            userPubkey: string;
+            relayUrls?: string[];
+            secret?: string | null;
+            /** Per-request timeout in ms (see {@link NDKNip46Signer.timeout}). */
+            timeout?: number;
+        },
+    ): NDKNip46Signer {
+        const signer = new NDKNip46Signer(ndk, false, session.localSigner, session.relayUrls);
+        signer.bunkerPubkey = session.bunkerPubkey;
+        signer.userPubkey = session.userPubkey;
+        signer.secret = session.secret ?? null;
+        if (session.timeout !== undefined) signer.timeout = session.timeout;
+        signer._user = ndk.getUser({ pubkey: session.userPubkey });
+        signer.startListening().catch((e) => signer.debug("Failed to listen for bunker responses", e));
+        return signer;
+    }
+
+    /**
      * Deserializes the signer from a payload string.
      * @param payloadString The JSON string obtained from toPayload().
      * @param ndk The NDK instance, required for NIP-46.

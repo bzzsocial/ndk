@@ -1,5 +1,11 @@
 # @nostr-dev-kit/ndk
 
+## 3.0.3-bzz.4
+
+### Patch Changes
+
+- Adds `verifyBeforeEmit`: with a verification worker or `signatureVerificationFunction`, relay events are cached and emitted only once their signature checks out. A forged event is never delivered, and EOSE waits for the events that came before it.
+
 ## 3.0.3-bzz.3
 
 ### Patch Changes

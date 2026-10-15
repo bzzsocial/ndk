@@ -15,7 +15,7 @@ describe("openDatabase", () => {
         createDatabase(name);
         await openDatabase();
 
-        expect(db.verno).toBe(19);
+        expect(db.verno).toBe(20);
         expect(await db.events.count()).toBe(0);
         await db.eventTags.put({ tagValue: "p:x", eventId: "a" });
         expect(await db.eventTags.count()).toBe(1);
@@ -31,5 +31,19 @@ describe("openDatabase", () => {
         createDatabase(name);
         await openDatabase();
         expect(await db.events.count()).toBe(1);
+    });
+
+    it("adds the eventTags eventId index to a schema-19 cache without dropping data", async () => {
+        const name = `v19-${Math.random()}`;
+        const v19 = new Dexie(name);
+        v19.version(19).stores({ events: "&id, kind", eventTags: "[tagValue+eventId], tagValue" });
+        await v19.open();
+        await v19.table("eventTags").put({ tagValue: "p:x", eventId: "a" });
+        v19.close();
+
+        createDatabase(name);
+        await openDatabase();
+        expect(db.verno).toBe(20);
+        expect(await db.eventTags.where("eventId").equals("a").count()).toBe(1);
     });
 });

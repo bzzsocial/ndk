@@ -7,7 +7,11 @@ export interface CacheOptions<T> {
     maxSize: number;
     dump: (dirtyKeys: Set<string>, cache: LRUCache<string, T>) => Promise<void>;
     debug: debug.IDebugger;
+    /** Entries written per IndexedDB batch; the write yields to the event loop between batches. */
+    dumpChunkSize?: number;
 }
+
+const yieldToEventLoop = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
 export class CacheHandler<T> {
     private cache?: LRUCache<string, T>;
@@ -17,6 +21,7 @@ export class CacheHandler<T> {
     public indexes: Map<string | number, LRUCache<string | number, Set<string>>>;
     public isSet = false;
     public maxSize = 0;
+    private dumping = false;
 
     constructor(options: CacheOptions<T>) {
         this.debug = options.debug;
@@ -133,10 +138,28 @@ export class CacheHandler<T> {
         this.dirtyKeys.add(key);
     }
 
+    /**
+     * Writes the entries changed since the last write, in batches so a large backlog
+     * doesn't block the main thread. Entries changed while writing stay dirty for the
+     * next write; entries whose batch failed are retried.
+     */
     private async dump() {
-        if (this.dirtyKeys.size > 0 && this.cache) {
-            await this.options.dump(this.dirtyKeys, this.cache);
-            this.dirtyKeys.clear();
+        if (this.dumping || this.dirtyKeys.size === 0 || !this.cache) return;
+        this.dumping = true;
+        const keys = Array.from(this.dirtyKeys);
+        this.dirtyKeys.clear();
+        const chunkSize = this.options.dumpChunkSize ?? 50;
+        let written = 0;
+        try {
+            for (; written < keys.length; written += chunkSize) {
+                if (written > 0) await yieldToEventLoop();
+                await this.options.dump(new Set(keys.slice(written, written + chunkSize)), this.cache);
+            }
+        } catch (e) {
+            for (const key of keys.slice(written)) this.dirtyKeys.add(key);
+            throw e;
+        } finally {
+            this.dumping = false;
         }
     }
 

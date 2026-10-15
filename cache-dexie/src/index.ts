@@ -380,8 +380,28 @@ export default class NDKCacheAdapterDexie implements NDKCacheAdapter {
     }
 
     public async deleteEventIds(eventIds: NDKEventId[]): Promise<void> {
+        if (eventIds.length === 0) return;
         eventIds.forEach((id) => this.events.delete(id));
-        await db.events.where({ id: eventIds }).delete();
+        await db.transaction("rw", [db.events, db.eventTags, db.eventRelays, db.decryptedEvents], async () => {
+            await db.events.where("id").anyOf(eventIds).delete();
+            await db.eventTags.where("eventId").anyOf(eventIds).delete();
+            await db.eventRelays.where("eventId").anyOf(eventIds).delete();
+            await db.decryptedEvents.bulkDelete(eventIds);
+        });
+    }
+
+    /**
+     * Deletes stored events of `kinds` created before `before` (unix seconds), with
+     * their tags and relay records. Returns how many events were deleted.
+     */
+    public async prune({ kinds, before }: { kinds: number[]; before: number }): Promise<number> {
+        const ids = (await db.events
+            .where("kind")
+            .anyOf(kinds)
+            .and((e) => e.createdAt < before)
+            .primaryKeys()) as NDKEventId[];
+        await this.deleteEventIds(ids);
+        return ids.length;
     }
 
     public addUnpublishedEvent = addUnpublishedEvent.bind(this);

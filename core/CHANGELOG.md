@@ -1,5 +1,13 @@
 # @nostr-dev-kit/ndk
 
+## 3.0.3-bzz.3
+
+### Patch Changes
+
+- Fixes `eose` never firing when fewer than two relays answer. The wait now starts with the first answer and shrinks as more of the requested relays finish.
+- Adds a `relay:eose` subscription event for each relay that finishes (EOSE or a final CLOSED), again after a re-send.
+- Fixes a subscription hanging with no events and no EOSE when the cache adapter's query fails. It now asks the relays.
+
 ## 3.0.3-bzz.2
 
 ### Patch Changes

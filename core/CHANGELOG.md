@@ -1,5 +1,16 @@
 # @nostr-dev-kit/ndk
 
+## 3.0.3-bzz.2
+
+### Patch Changes
+
+- Re-sends running subscriptions when a relay reconnects. Before, a live subscription went silent after any socket drop.
+- Adds `relay.ping(timeoutMs)`, a probe that only counts the relay's answer to its own REQ, and `relay.reconnect()`, which replaces the socket even while the old one is closing. The keepalive and wake checks use `ping()` now.
+- Fixes `relayConnectionFilter` being bypassed by relay sets and temporary relays: a refused relay now never opens a socket.
+- Fixes a subscription with an explicit relay set being extended to other pool relays as they connected.
+- Fixes connection monitoring stopping for good after `disconnect()`, missing dead sockets on authenticated connections, and a closed socket's late events reaching its replacement.
+- Fixes `disconnect()` leaving a scheduled reconnect in place, and `addExplicitRelay()` changing the array passed as `explicitRelayUrls`.
+
 ## 3.0.3-bzz.1
 
 ### Patch Changes

@@ -1,5 +1,15 @@
 # @nostr-dev-kit/ndk
 
+## 3.0.3-bzz.1
+
+### Patch Changes
+
+- Fixes a reconnect loop on relays that send AUTH: a REQ stopped before AUTH finished was re-sent as the invalid frame `["REQ","id",]`, and the relay dropped the socket. REQ, COUNT and CLOSE frames are now built as JSON, and an empty REQ is never sent.
+- Fixes NIP-42 state: `authed` now fires once, after the relay's OK, and the connection stays AUTHENTICATED. A rejected AUTH or a throwing policy emits `auth:failed`.
+- Fixes authenticated relays not reconnecting after the socket drops.
+- Adds `relay.authenticate()` and `relay.authChallenge`, to answer the current challenge on demand and wait for the relay's OK.
+- Answers a `CLOSED "auth-required:"` by authenticating and re-sending that REQ once. Any other CLOSED is final and counts as that relay finishing, so fetches stop waiting on it.
+
 ## 3.0.3-bzz.0
 
 ### Patch Changes

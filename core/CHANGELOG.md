@@ -1,5 +1,12 @@
 # @nostr-dev-kit/ndk
 
+## 3.0.3-bzz.5
+
+### Patch Changes
+
+- Fixes `NDKEvent.reply()` threading kind-1 replies under the grandparent. A reply now carries one `root` and one `reply` marker (NIP-10), drops the parent's mention e-tags, writes `p` tags as hex and keeps `a`/`h` scope tags.
+- Adds `NDKNip46Signer.restore()` to resume an approved bunker session synchronously, without a new `connect` request.
+
 ## 3.0.3-bzz.4
 
 ### Patch Changes

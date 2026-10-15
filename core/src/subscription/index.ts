@@ -332,6 +332,8 @@ export const defaultOpts: NDKSubscriptionOptions = {
 export class NDKSubscription extends EventEmitter<{
     cacheEose: () => void;
     eose: (sub: NDKSubscription) => void;
+    /** One relay finished sending what it has (EOSE, or a final CLOSED); again after a re-send. */
+    "relay:eose": (relay: NDKRelay, sub: NDKSubscription) => void;
     close: (sub: NDKSubscription) => void;
 
     /**
@@ -640,6 +642,10 @@ export class NDKSubscription extends EventEmitter<{
                             return;
                         }
                         loadFromRelays();
+                    }, (e) => {
+                        // A failed cache read must not stop the relays from being asked.
+                        this.debug("Cache query failed, asking relays", e);
+                        loadFromRelays();
                     });
                     return null;
                 }
@@ -666,6 +672,9 @@ export class NDKSubscription extends EventEmitter<{
                     if (!this.shouldQueryRelays()) {
                         this.emit("eose", this);
                     }
+                }, (e) => {
+                    this.debug("Cache query failed", e);
+                    if (!this.shouldQueryRelays()) this.emit("eose", this);
                 });
 
                 // Only load from relays if we should query them
@@ -992,6 +1001,7 @@ export class NDKSubscription extends EventEmitter<{
 
     public eoseReceived(relay: NDKRelay): void {
         this.eosesSeen.add(relay);
+        this.emit("relay:eose", relay, this);
 
         let lastEventSeen = this.lastEventReceivedAt ? Date.now() - this.lastEventReceivedAt : undefined;
 
@@ -1027,14 +1037,13 @@ export class NDKSubscription extends EventEmitter<{
                 return;
             }
 
-            // Reduce the number of ms to wait based on the percentage of relays
-            // that have already sent an EOSE, the more
-            // relays that have sent an EOSE, the less time we should wait
-            // for the next one
-            const percentageOfRelaysThatHaveSentEose = this.eosesSeen.size / connectedRelaysWithFilters.length;
+            // Reduce the number of ms to wait based on the share of the requested relays
+            // that have already sent an EOSE: the more have, the less time we wait for
+            // the rest. Relays still connecting count, so the first one to answer doesn't
+            // end the wait for them; relays that never answer don't hold it forever.
+            const percentageOfRelaysThatHaveSentEose = Math.min(1, this.eosesSeen.size / this.relayFilters.size);
 
-            // If less than 2 and 50% of relays have EOSEd don't add a timeout yet
-            if (this.eosesSeen.size >= 2 && percentageOfRelaysThatHaveSentEose >= 0.5) {
+            if (this.eosesSeen.size >= 1) {
                 timeToWaitForNextEose = timeToWaitForNextEose * (1 - percentageOfRelaysThatHaveSentEose);
 
                 if (timeToWaitForNextEose === 0) {

@@ -237,6 +237,22 @@ export class NDKRelay extends EventEmitter<{
     }
 
     /**
+     * Resolves true if the relay answers a probe REQ within `timeoutMs` (default 3s).
+     * Use it to tell a silent-but-alive socket from a dead one.
+     */
+    public ping(timeoutMs?: number): Promise<boolean> {
+        return this.connectivity.ping(timeoutMs);
+    }
+
+    /**
+     * Replaces this relay's socket with a new one (also while it is closing) and
+     * resolves once the new one is ready. Running subscriptions are re-sent.
+     */
+    public reconnect(timeoutMs?: number): Promise<void> {
+        return this.connectivity.reconnect(timeoutMs);
+    }
+
+    /**
      * Connects to the relay.
      */
     public async connect(timeoutMs?: number, reconnect = true): Promise<void> {

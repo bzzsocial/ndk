@@ -429,7 +429,8 @@ export class NDK extends EventEmitter<{
 
         this.debug = opts.debug || debug("ndk");
         this.netDebug = opts.netDebug;
-        this._explicitRelayUrls = opts.explicitRelayUrls || [];
+        // a copy: addExplicitRelay() appends to it
+        this._explicitRelayUrls = [...(opts.explicitRelayUrls || [])];
         this.subManager = new NDKSubscriptionManager();
         this.pool = new NDKPool(opts.explicitRelayUrls || [], this);
         this.pool.name = "Main";

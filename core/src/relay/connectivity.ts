@@ -6,7 +6,7 @@ import type { NDK, NDKNetDebug } from "../ndk/index.js";
 import type { NDKFilter } from "../subscription";
 import type { NDKRelay, NDKRelayConnectionStats } from ".";
 import { NDKRelayStatus } from ".";
-import { NDKRelayKeepalive, probeRelayConnection } from "./keepalive";
+import { NDKRelayKeepalive } from "./keepalive";
 import type { NDKRelaySubscription } from "./subscription";
 
 // Removed MAX_RECONNECT_ATTEMPTS - we retry indefinitely with capped backoff
@@ -54,6 +54,13 @@ export class NDKRelayConnectivity {
     /** How long to wait for the relay's OK on an AUTH event. */
     public authTimeoutMs = 10_000;
 
+    /** Silence after which the keepalive pings the relay. */
+    public keepaliveIdleMs = 120_000;
+    private pings = new Map<string, (answered: boolean) => void>();
+    private pingInFlight?: Promise<boolean>;
+    /** Subscriptions running when the last connection dropped; re-sent on the next one. */
+    private retiredSubs = new Set<NDKRelaySubscription>();
+
     // Keepalive and monitoring
     private keepalive?: NDKRelayKeepalive;
     private wsStateMonitor?: ReturnType<typeof setInterval>;
@@ -76,23 +83,9 @@ export class NDKRelayConnectivity {
      */
     private setupMonitoring(): void {
         // Setup keepalive to detect silent relays
-        this.keepalive = new NDKRelayKeepalive(120000, async () => {
+        this.keepalive = new NDKRelayKeepalive(this.keepaliveIdleMs, async () => {
             this.debug("Relay silence detected, probing connection");
-            const isAlive = await probeRelayConnection({
-                send: (msg: any[]) => this.send(JSON.stringify(msg)),
-                once: (event: string, handler: () => void) => {
-                    const messageHandler = (e: MessageEvent) => {
-                        try {
-                            const data = JSON.parse(e.data);
-                            if (data[0] === "EOSE" || data[0] === "EVENT" || data[0] === "NOTICE") {
-                                handler();
-                                this.ws?.removeEventListener("message", messageHandler);
-                            }
-                        } catch {}
-                    };
-                    this.ws?.addEventListener("message", messageHandler);
-                },
-            });
+            const isAlive = await this.ping(5_000);
 
             if (!isAlive) {
                 this.debug("Probe failed, connection is stale");
@@ -102,7 +95,7 @@ export class NDKRelayConnectivity {
 
         // Monitor WebSocket readyState every 5 seconds
         this.wsStateMonitor = setInterval(() => {
-            if (this._status === NDKRelayStatus.CONNECTED) {
+            if (this._status >= NDKRelayStatus.CONNECTED) {
                 if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
                     this.debug("WebSocket died silently, reconnecting");
                     this.handleStaleConnection();
@@ -134,15 +127,9 @@ export class NDKRelayConnectivity {
         // Stop keepalive
         this.keepalive?.stop();
 
-        // Clean up the dead WebSocket
-        if (this.ws) {
-            try {
-                this.ws.close();
-            } catch (e) {
-                // Ignore errors closing dead socket
-            }
-            this.ws = undefined;
-        }
+        // Clean up the dead WebSocket; its late close event must not touch the next one
+        this.dropSocket();
+        this.retireConnection();
 
         this._status = NDKRelayStatus.DISCONNECTED;
         this.ndkRelay.emit("disconnect");
@@ -164,21 +151,7 @@ export class NDKRelayConnectivity {
                 this.handleStaleConnection();
             } else {
                 // Connection seems OK, but probe to be sure
-                probeRelayConnection({
-                    send: (msg: any[]) => this.send(JSON.stringify(msg)),
-                    once: (event: string, handler: () => void) => {
-                        const messageHandler = (e: MessageEvent) => {
-                            try {
-                                const data = JSON.parse(e.data);
-                                if (data[0] === "EOSE" || data[0] === "EVENT" || data[0] === "NOTICE") {
-                                    handler();
-                                    this.ws?.removeEventListener("message", messageHandler);
-                                }
-                            } catch {}
-                        };
-                        this.ws?.addEventListener("message", messageHandler);
-                    },
-                }).then((isAlive) => {
+                this.ping(5_000).then((isAlive) => {
                     if (!isAlive) {
                         this.handleStaleConnection();
                     }
@@ -214,6 +187,12 @@ export class NDKRelayConnectivity {
      * @returns A Promise that resolves when the connection is established, or rejects if the connection fails.
      */
     async connect(timeoutMs?: number, reconnect = true): Promise<void> {
+        const filter = this.ndk?.relayConnectionFilter;
+        if (filter && !filter(this.ndkRelay.url)) {
+            this.debug("Not connecting: refused by relayConnectionFilter");
+            return;
+        }
+
         // Check if WebSocket exists but is not open (stale connection)
         if (this.ws && this.ws.readyState !== WebSocket.OPEN && this.ws.readyState !== WebSocket.CONNECTING) {
             this.debug("Cleaning up stale WebSocket connection");
@@ -280,6 +259,15 @@ export class NDKRelayConnectivity {
     public disconnect(): void {
         this._status = NDKRelayStatus.DISCONNECTING;
 
+        if (this.reconnectTimeout) {
+            clearTimeout(this.reconnectTimeout);
+            this.reconnectTimeout = undefined;
+        }
+        if (this.connectTimeout) {
+            clearTimeout(this.connectTimeout);
+            this.connectTimeout = undefined;
+        }
+
         // Clean up monitoring
         this.keepalive?.stop();
         if (this.wsStateMonitor) {
@@ -334,12 +322,20 @@ export class NDKRelayConnectivity {
         this._status = NDKRelayStatus.CONNECTED;
         this.authChallenge = undefined;
 
+        // disconnect() stops monitoring; a new connection needs it again
+        if (!this.wsStateMonitor) this.setupMonitoring();
+
         // Start keepalive monitoring
         this.keepalive?.start();
         this.wasIdle = false;
 
         this.ndkRelay.emit("connect");
         this.ndkRelay.emit("ready");
+
+        // REQs that were running on the previous connection
+        const retired = [...this.retiredSubs];
+        this.retiredSubs.clear();
+        for (const sub of retired) sub.resubscribe();
     }
 
     /**
@@ -358,6 +354,7 @@ export class NDKRelayConnectivity {
 
         // Clear any pending publish/auth promises to prevent memory leaks
         this.clearPendingPublishes(new Error(`Relay ${this.ndkRelay.url} disconnected`));
+        this.retireConnection();
 
         if (this._status >= NDKRelayStatus.CONNECTED) {
             this.handleReconnection();
@@ -402,6 +399,12 @@ export class NDKRelayConnectivity {
             const handler = this.ndkRelay.getProtocolHandler(cmd);
             if (handler) {
                 handler(this.ndkRelay, data);
+                return;
+            }
+
+            const ping = (cmd === "EVENT" || cmd === "EOSE" || cmd === "CLOSED") && this.pings.get(id);
+            if (ping) {
+                ping(cmd !== "CLOSED");
                 return;
             }
 
@@ -909,6 +912,89 @@ export class NDKRelayConnectivity {
      * @param params - The subscription parameters, including an optional custom id.
      * @returns A new NDKRelaySubscription instance.
      */
+    /**
+     * Asks the relay something it must answer (a REQ for nothing) and resolves true
+     * when it answers that REQ — EVENT, EOSE or CLOSED — or false after `timeoutMs`.
+     * Other traffic on the socket doesn't count. Concurrent calls share one probe.
+     */
+    public ping(timeoutMs = 3_000): Promise<boolean> {
+        if (!this.connected) return Promise.resolve(false);
+        if (this.pingInFlight) return this.pingInFlight;
+
+        const id = `ping-${++this.serial}-${Math.random().toString(36).substring(2, 7)}`;
+        const probe = new Promise<boolean>((resolve) => {
+            const done = (answered: boolean, closeReq: boolean) => {
+                clearTimeout(timer);
+                this.pings.delete(id);
+                if (closeReq) this.send(JSON.stringify(["CLOSE", id]));
+                resolve(answered);
+            };
+            const timer = setTimeout(() => done(false, true), timeoutMs);
+            // a CLOSED already ended the REQ
+            this.pings.set(id, (stillOpen) => done(true, stillOpen));
+            this.send(JSON.stringify(["REQ", id, { kinds: [0], limit: 0 }]));
+        }).finally(() => {
+            if (this.pingInFlight === probe) this.pingInFlight = undefined;
+        });
+        this.pingInFlight = probe;
+        return probe;
+    }
+
+    /**
+     * Replaces the current socket with a new one, also while the old one is still
+     * closing. Running subscriptions are re-sent on the new connection.
+     */
+    public async reconnect(timeoutMs?: number): Promise<void> {
+        if (this.ws || this._status >= NDKRelayStatus.CONNECTED || this._status === NDKRelayStatus.DISCONNECTING) {
+            const closed = new Promise<void>((resolve) => {
+                const timer = setTimeout(resolve, timeoutMs ?? 3_000);
+                this.ndkRelay.once("disconnect", () => {
+                    clearTimeout(timer);
+                    resolve();
+                });
+            });
+            if (this._status !== NDKRelayStatus.DISCONNECTING) this.disconnect();
+            await closed;
+            // The old socket never reported closing: let it go.
+            if (this.ws || this._status !== NDKRelayStatus.DISCONNECTED) {
+                this.dropSocket();
+                this.retireConnection();
+                this._status = NDKRelayStatus.DISCONNECTED;
+            }
+        }
+        if (this.reconnectTimeout) {
+            clearTimeout(this.reconnectTimeout);
+            this.reconnectTimeout = undefined;
+        }
+
+        const connected = new Promise<void>((resolve) => this.ndkRelay.once("ready", () => resolve()));
+        await this.connect(timeoutMs);
+        await connected;
+    }
+
+    /** Closes the socket without letting its later events reach this connection. */
+    private dropSocket(): void {
+        const ws = this.ws;
+        this.ws = undefined;
+        if (!ws) return;
+        ws.onopen = null;
+        ws.onclose = null;
+        ws.onmessage = null;
+        ws.onerror = null;
+        try {
+            ws.close();
+        } catch {
+            // already dead
+        }
+    }
+
+    /** The REQs on this connection end with it; running ones are re-sent on the next one. */
+    private retireConnection(): void {
+        for (const sub of this.openSubs.values()) this.retiredSubs.add(sub);
+        this.openSubs.clear();
+        this.pings.clear();
+    }
+
     public req(relaySub: NDKRelaySubscription): void {
         // A REQ needs at least one filter; ["REQ","id"] is rejected by relays.
         if (!relaySub.executeFilters?.length) {

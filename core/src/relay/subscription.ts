@@ -426,6 +426,23 @@ export class NDKRelaySubscription {
         this.relay.req(this);
     }
 
+    /**
+     * Sends this REQ again on a new connection, if anyone still wants it.
+     */
+    public resubscribe() {
+        if (this.status !== NDKRelaySubscriptionStatus.RUNNING) return;
+        if (this.items.size === 0) {
+            this.status = NDKRelaySubscriptionStatus.CLOSED;
+            this.cleanup();
+            return;
+        }
+        this._subId = undefined;
+        this.eosed = false;
+        this.authRetried = false;
+        this.status = NDKRelaySubscriptionStatus.PENDING;
+        this.execute();
+    }
+
     public onstart() {}
     public onevent(event: NostrEvent) {
         this.topSubManager.dispatchEvent(event, this.relay);

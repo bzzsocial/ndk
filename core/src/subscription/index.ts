@@ -694,6 +694,9 @@ export class NDKSubscription extends EventEmitter<{
      * they should be part of this subscription.
      */
     private startPoolMonitor(): void {
+        // An explicit relay set is the whole list of relays to ask.
+        if (this.relaySet && this.relaySet.relays.size > 0) return;
+
         const _d = this.debug.extend("pool-monitor");
 
         this.poolMonitor = (relay: NDKRelay) => {

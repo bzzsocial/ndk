@@ -1056,10 +1056,10 @@ export class NDKSubscription extends EventEmitter<{
         this.pendingVerifications.add(check);
     }
 
-    public eoseReceived(relay: NDKRelay): void {
-        // Events that arrived before this EOSE come first.
-        if (this.pendingVerifications.size > 0) {
-            Promise.allSettled(Array.from(this.pendingVerifications)).then(() => this.eoseReceived(relay));
+    public eoseReceived(relay: NDKRelay, afterPendingVerifications = true): void {
+        // Events that arrived before this EOSE come first; ones arriving later don't hold it.
+        if (afterPendingVerifications && this.pendingVerifications.size > 0) {
+            Promise.allSettled(Array.from(this.pendingVerifications)).then(() => this.eoseReceived(relay, false));
             return;
         }
         this.eosesSeen.add(relay);

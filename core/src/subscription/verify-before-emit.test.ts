@@ -85,6 +85,19 @@ describe("verifyBeforeEmit", () => {
         expect(s.order).toEqual([`event:${ev.id}`, "eose"]);
     });
 
+    it("doesn't hold eose for events that arrive after it", async () => {
+        const s = await setup();
+        const before = await s.signed("before");
+        const after = await s.signed("after");
+        s.recv(["EVENT", s.subId, before]);
+        s.recv(["EOSE", s.subId]);
+        s.recv(["EVENT", s.subId, after]);
+        s.verifier.settle(before.id!, true);
+        await tick();
+        // `after` is still being verified; EOSE must not wait for it
+        expect(s.order).toEqual([`event:${before.id}`, "eose"]);
+    });
+
     it("leaves the default (emit, then verify) unchanged when off", async () => {
         const s = await setup(false);
         const ev = await s.signed("hi");

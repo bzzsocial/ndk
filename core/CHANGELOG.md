@@ -1,5 +1,11 @@
 # @nostr-dev-kit/ndk
 
+## 3.0.3-bzz.0
+
+### Patch Changes
+
+- Publishes as `3.0.3-bzz.0` from the bzzsocial fork, with no behavior changes from 3.0.3.
+
 ## 3.0.3
 
 ### Patch Changes

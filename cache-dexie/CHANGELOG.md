@@ -1,5 +1,12 @@
 # @nostr-dev-kit/ndk-cache-dexie
 
+## 2.7.8-bzz.0
+
+### Patch Changes
+
+- Fixes caches written by adapter 2.6.x failing to open: the database is now recreated when its schema can't be upgraded in place.
+- Makes `@nostr-dev-kit/ndk` a peer dependency, so apps no longer install a second copy of NDK.
+
 ## 2.7.8
 
 ### Patch Changes

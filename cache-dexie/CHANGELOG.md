@@ -1,5 +1,13 @@
 # @nostr-dev-kit/ndk-cache-dexie
 
+## 2.7.8-bzz.1
+
+### Patch Changes
+
+- Fixes `deleteEventIds` deleting nothing from IndexedDB. It now also removes the events' tag, relay and decrypted rows.
+- Adds `prune({ kinds, before })`, which deletes stored events of those kinds older than a cutoff, so apps can bound the cache's growth.
+- Writes cache changes to IndexedDB in small batches instead of one long main-thread task. Entries changed during a write are no longer lost, and failed writes are retried.
+
 ## 2.7.8-bzz.0
 
 ### Patch Changes

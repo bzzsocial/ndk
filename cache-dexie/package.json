@@ -1,6 +1,6 @@
 {
     "name": "@nostr-dev-kit/cache-dexie",
-    "version": "2.7.8-bzz.0",
+    "version": "2.7.8-bzz.1",
     "description": "NDK Dexie Cache Adapter",
     "license": "MIT",
     "docs": "typedoc",

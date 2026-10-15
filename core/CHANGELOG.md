@@ -1,5 +1,11 @@
 # @nostr-dev-kit/ndk
 
+## 3.0.3-bzz.6
+
+### Patch Changes
+
+- Fixes `verifyBeforeEmit` holding EOSE back on a busy subscription. EOSE now waits only for the events that arrived before it.
+
 ## 3.0.3-bzz.5
 
 ### Patch Changes

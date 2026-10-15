@@ -13,6 +13,7 @@ import { decrypt, encrypt } from "./encryption.js";
 import { fetchReplyEvent, fetchRootEvent, fetchTaggedEvent } from "./fetch-tagged-event.js";
 import { isEphemeral, isParamReplaceable, isReplaceable } from "./kind.js";
 import { NDKKind } from "./kinds/index.js";
+import { nip10ReplyTags } from "./nip10.js";
 import { encode } from "./nip19.js";
 import type { NIP73EntityType } from "./nip73.js";
 import { repost } from "./repost.js";
@@ -989,19 +990,10 @@ export class NDKEvent extends EventEmitter {
 
         if (this.kind === 1 && !forceNip22) {
             reply.kind = 1;
-            const opHasETag = this.hasTag("e");
-
-            if (opHasETag) {
-                reply.tags = [
-                    ...reply.tags,
-                    ...this.getMatchingTags("e"),
-                    ...this.getMatchingTags("p"),
-                    ...this.getMatchingTags("a"),
-                    ...this.referenceTags("reply", false, undefined, opts),
-                ];
-            } else {
-                reply.tag(this, "root", false, undefined, opts);
-            }
+            reply.tags = [
+                ...reply.tags,
+                ...nip10ReplyTags(this, { relayHint: this.relay?.url, pTags: opts?.pTags }),
+            ];
         } else {
             reply.kind = NDKKind.GenericReply;
 

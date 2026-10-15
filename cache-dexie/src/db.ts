@@ -102,3 +102,19 @@ export let db: Database;
 export function createDatabase(name: string): void {
     db = new Database(name);
 }
+
+/**
+ * Open the database, deleting and recreating it if the stored schema can't be
+ * upgraded in place (e.g. a primary-key change from an older adapter version).
+ * Everything stored here is a cache, so starting empty is safe.
+ */
+export async function openDatabase(debug?: (...args: unknown[]) => void): Promise<void> {
+    try {
+        await db.open();
+    } catch (e) {
+        debug?.("Cache database could not be opened, recreating it", e);
+        db.close();
+        await Dexie.delete(db.name);
+        await db.open();
+    }
+}

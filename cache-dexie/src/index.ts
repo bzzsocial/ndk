@@ -30,7 +30,15 @@ import {
     unpublishedEventsWarmUp,
 } from "./caches/unpublished-events.js";
 import { type ZapperCacheEntry, zapperDump, zapperWarmUp } from "./caches/zapper.js";
-import { createDatabase, db, type Event, type Profile, type RelayStatus, type UnpublishedEvent } from "./db.js";
+import {
+    createDatabase,
+    db,
+    openDatabase,
+    type Event,
+    type Profile,
+    type RelayStatus,
+    type UnpublishedEvent,
+} from "./db.js";
 import { CacheHandler } from "./lru-cache.js";
 
 export { db } from "./db";
@@ -142,17 +150,19 @@ export default class NDKCacheAdapterDexie implements NDKCacheAdapter {
         };
 
         const startTime = Date.now();
-        this.warmUpPromise = Promise.allSettled([
-            profile("profilesWarmUp", () => profilesWarmUp(this.profiles, db.profiles)),
-            profile("zapperWarmUp", () => zapperWarmUp(this.zappers, db.lnurl)),
-            profile("nip05WarmUp", () => nip05WarmUp(this.nip05s, db.nip05)),
-            profile("relayInfoWarmUp", () => relayInfoWarmUp(this.relayInfo, db.relayStatus)),
-            profile("unpublishedEventsWarmUp", () =>
-                unpublishedEventsWarmUp(this.unpublishedEvents, db.unpublishedEvents),
-            ),
-            profile("eventsWarmUp", () => eventsWarmUp(this.events, db.events)),
-            profile("eventTagsWarmUp", () => eventTagsWarmUp(this.eventTags, db.eventTags)),
-        ]);
+        this.warmUpPromise = openDatabase(this.debug).then(() =>
+            Promise.allSettled([
+                profile("profilesWarmUp", () => profilesWarmUp(this.profiles, db.profiles)),
+                profile("zapperWarmUp", () => zapperWarmUp(this.zappers, db.lnurl)),
+                profile("nip05WarmUp", () => nip05WarmUp(this.nip05s, db.nip05)),
+                profile("relayInfoWarmUp", () => relayInfoWarmUp(this.relayInfo, db.relayStatus)),
+                profile("unpublishedEventsWarmUp", () =>
+                    unpublishedEventsWarmUp(this.unpublishedEvents, db.unpublishedEvents),
+                ),
+                profile("eventsWarmUp", () => eventsWarmUp(this.events, db.events)),
+                profile("eventTagsWarmUp", () => eventTagsWarmUp(this.eventTags, db.eventTags)),
+            ]),
+        );
         this.warmUpPromise.then(() => {
             const endTime = Date.now();
             this.warmedUp = true;
@@ -202,21 +212,25 @@ export default class NDKCacheAdapterDexie implements NDKCacheAdapter {
     }
 
     public async getProfiles(
-        filter: ((pubkey: Hexpubkey, profile: NDKUserProfile) => boolean) | { field?: string; fields?: string[]; contains: string },
+        filter:
+            | ((pubkey: Hexpubkey, profile: NDKUserProfile) => boolean)
+            | { field?: string; fields?: string[]; contains: string },
     ): Promise<Map<Hexpubkey, NDKUserProfile> | undefined> {
         if (!this.profiles) return;
 
         // Convert descriptor filter to function if needed
-        const filterFn = typeof filter === 'function'
-            ? filter
-            : (pubkey: Hexpubkey, profile: NDKUserProfile) => {
-                const searchLower = filter.contains.toLowerCase();
-                const fields = filter.fields || (filter.field ? [filter.field] : ['name', 'displayName', 'nip05']);
-                return fields.some(field => {
-                    const value = (profile as any)[field];
-                    return typeof value === 'string' && value.toLowerCase().includes(searchLower);
-                });
-            };
+        const filterFn =
+            typeof filter === "function"
+                ? filter
+                : (pubkey: Hexpubkey, profile: NDKUserProfile) => {
+                      const searchLower = filter.contains.toLowerCase();
+                      const fields =
+                          filter.fields || (filter.field ? [filter.field] : ["name", "displayName", "nip05"]);
+                      return fields.some((field) => {
+                          const value = (profile as any)[field];
+                          return typeof value === "string" && value.toLowerCase().includes(searchLower);
+                      });
+                  };
 
         return this.profiles.getAllWithFilter(filterFn);
     }

@@ -222,6 +222,21 @@ export class NDKRelay extends EventEmitter<{
     }
 
     /**
+     * The NIP-42 challenge the relay sent on the current connection, if any.
+     */
+    get authChallenge(): string | undefined {
+        return this.connectivity.authChallenge;
+    }
+
+    /**
+     * Answers the relay's NIP-42 challenge with this relay's auth policy (or the
+     * NDK default). Resolves true once the relay accepts, false otherwise.
+     */
+    public authenticate(): Promise<boolean> {
+        return this.connectivity.authenticate();
+    }
+
+    /**
      * Connects to the relay.
      */
     public async connect(timeoutMs?: number, reconnect = true): Promise<void> {

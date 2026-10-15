@@ -63,6 +63,9 @@ export class NDKRelaySubscription {
      */
     private eosed = false;
 
+    /** Whether this REQ already re-sent after a CLOSED "auth-required:". */
+    private authRetried = false;
+
     /**
      * Timeout at which this subscription will
      * start executing.
@@ -90,11 +93,7 @@ export class NDKRelaySubscription {
      *
      * @param fingerprint The fingerprint of this subscription.
      */
-    constructor(
-        relay: NDKRelay,
-        fingerprint: NDKFilterFingerprint | null,
-        topSubManager: NDKSubscriptionManager,
-    ) {
+    constructor(relay: NDKRelay, fingerprint: NDKFilterFingerprint | null, topSubManager: NDKSubscriptionManager) {
         this.relay = relay;
         this.topSubManager = topSubManager;
         this.debug = relay.debug.extend(`sub[${this.id}]`);
@@ -168,8 +167,17 @@ export class NDKRelaySubscription {
         if (this.items.size === 0) {
             // If we haven't started executing yet (INITIAL or PENDING), cleanup immediately
             // to prevent sending an empty REQ when the timer fires
-            if (this.status === NDKRelaySubscriptionStatus.INITIAL ||
-                this.status === NDKRelaySubscriptionStatus.PENDING) {
+            if (
+                this.status === NDKRelaySubscriptionStatus.INITIAL ||
+                this.status === NDKRelaySubscriptionStatus.PENDING
+            ) {
+                this.status = NDKRelaySubscriptionStatus.CLOSED;
+                this.cleanup();
+                return;
+            }
+
+            // Nothing was sent yet; nothing to wait for.
+            if (this.status === NDKRelaySubscriptionStatus.WAITING) {
                 this.status = NDKRelaySubscriptionStatus.CLOSED;
                 this.cleanup();
                 return;
@@ -177,7 +185,11 @@ export class NDKRelaySubscription {
 
             // if we haven't received an EOSE yet, don't close, relays don't like that
             // rather, when we EOSE and we have 0 items we will close there.
-            if (!this.eosed) return;
+            // Nobody is left to re-send this for after AUTH, though.
+            if (!this.eosed) {
+                this.relay.off("authed", this.reExecuteAfterAuth);
+                return;
+            }
 
             // no more items, close the subscription
             this.close();
@@ -302,15 +314,12 @@ export class NDKRelaySubscription {
     private executeOnRelayReady = () => {
         if (this.status !== NDKRelaySubscriptionStatus.WAITING) return;
         if (this.items.size === 0) {
-            this.debug(
-                "No items to execute; this relay was probably too slow to respond and the caller gave up",
-                {
-                    status: this.status,
-                    fingerprint: this.fingerprint,
-                    id: this.id,
-                    subId: this.subId,
-                },
-            );
+            this.debug("No items to execute; this relay was probably too slow to respond and the caller gave up", {
+                status: this.status,
+                fingerprint: this.fingerprint,
+                id: this.id,
+                subId: this.subId,
+            });
             this.cleanup();
             return;
         }
@@ -348,23 +357,29 @@ export class NDKRelaySubscription {
 
     // we do it this way so that we can remove the listener
     private reExecuteAfterAuth = (() => {
+        if (this.status === NDKRelaySubscriptionStatus.CLOSED) return;
+        if (this.items.size === 0) {
+            if (this.eosed) this.close();
+            return;
+        }
+
         const oldSubId = this.subId;
         this.debug("Re-executing after auth", this.items.size);
-        if (this.eosed) {
+        if (this.relay.connectivity.openSubs.get(oldSubId) !== this) {
+            // the relay already closed it (CLOSED) or the connection changed
+        } else if (this.eosed) {
             // we already received eose, so we can immediately close the old subscription
             // to create the new one
             this.relay.close(this.subId);
         } else {
             // relays don't like to have the subscription close before they eose back,
             // so wait until we eose before closing the old subscription
-            this.debug(
-                "We are abandoning an opened subscription, once it EOSE's, the handler will close it",
-                {
-                    oldSubId,
-                },
-            );
+            this.debug("We are abandoning an opened subscription, once it EOSE's, the handler will close it", {
+                oldSubId,
+            });
         }
         this._subId = undefined;
+        this.eosed = false;
         this.status = NDKRelaySubscriptionStatus.PENDING;
         this.execute();
         this.debug("Re-executed after auth %s 👉 %s", oldSubId, this.subId);
@@ -389,6 +404,16 @@ export class NDKRelaySubscription {
             this.relay.once("ready", this.executeOnRelayReady);
             return;
         }
+        const filters = this.compileFilters();
+        if (filters.length === 0) {
+            this.status = NDKRelaySubscriptionStatus.CLOSED;
+            this.cleanup();
+            return;
+        }
+
+        // Relays may hide events from a REQ sent before AUTH completes, so send it
+        // again once this connection authenticates.
+        this.relay.off("authed", this.reExecuteAfterAuth);
         if (this.relay.status < NDKRelayStatus.AUTHENTICATED) {
             this.relay.once("authed", this.reExecuteAfterAuth);
         }
@@ -397,7 +422,7 @@ export class NDKRelaySubscription {
 
         this.finalizeSubId();
 
-        this.executeFilters = this.compileFilters();
+        this.executeFilters = filters;
         this.relay.req(this);
     }
 
@@ -407,8 +432,6 @@ export class NDKRelaySubscription {
     }
 
     public oneose(subId: string) {
-        this.eosed = true;
-
         // if this is a different subId, then it belongs to a previously
         // created subscription we have abandoned; we can clean it up here
         if (subId !== this.subId) {
@@ -416,6 +439,8 @@ export class NDKRelaySubscription {
             this.relay.close(subId);
             return;
         }
+
+        this.eosed = true;
 
         // if we don't have any items left, this is a subscription in a slow
         // relay and the subscriptions have been EOSEd due to a timeout, we can
@@ -437,11 +462,41 @@ export class NDKRelaySubscription {
         this.status = NDKRelaySubscriptionStatus.CLOSED;
     }
 
-    public onclosed(reason?: string) {
-        if (!reason) return;
+    /**
+     * The relay ended this REQ (NIP-01 CLOSED). "auth-required:" is answered once
+     * when this connection can authenticate; anything else is final for this relay.
+     */
+    public onclosed(reason = "") {
+        this.relay.connectivity.openSubs.delete(this.subId);
+        if (this.status === NDKRelaySubscriptionStatus.CLOSED) return;
 
-        for (const { subscription } of this.items.values()) {
+        if (
+            reason.startsWith("auth-required:") &&
+            !this.authRetried &&
+            this.relay.status < NDKRelayStatus.AUTHENTICATED &&
+            this.items.size > 0
+        ) {
+            this.authRetried = true;
+            this.relay.off("authed", this.reExecuteAfterAuth);
+            this.relay.once("authed", this.reExecuteAfterAuth);
+            this.relay.authenticate().then((ok) => {
+                if (!ok) this.closedByRelay(reason);
+            });
+            return;
+        }
+
+        this.closedByRelay(reason);
+    }
+
+    private closedByRelay(reason: string) {
+        if (this.status === NDKRelaySubscriptionStatus.CLOSED) return;
+        this.status = NDKRelaySubscriptionStatus.CLOSED;
+        this.cleanup();
+
+        // This relay won't send anything more for these subscriptions.
+        for (const { subscription } of Array.from(this.items.values())) {
             subscription.closedReceived(this.relay, reason);
+            subscription.eoseReceived(this.relay);
         }
     }
 

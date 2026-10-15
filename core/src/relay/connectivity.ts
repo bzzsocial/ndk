@@ -48,6 +48,12 @@ export class NDKRelayConnectivity {
     private serial = 0;
     public baseEoseTimeout = 4_400;
 
+    /** The latest NIP-42 challenge on the current connection. */
+    public authChallenge?: string;
+    private authInFlight?: Promise<boolean>;
+    /** How long to wait for the relay's OK on an AUTH event. */
+    public authTimeoutMs = 10_000;
+
     // Keepalive and monitoring
     private keepalive?: NDKRelayKeepalive;
     private wsStateMonitor?: ReturnType<typeof setInterval>;
@@ -326,6 +332,7 @@ export class NDKRelayConnectivity {
         }
         this.updateConnectionStats.connected();
         this._status = NDKRelayStatus.CONNECTED;
+        this.authChallenge = undefined;
 
         // Start keepalive monitoring
         this.keepalive?.start();
@@ -352,10 +359,11 @@ export class NDKRelayConnectivity {
         // Clear any pending publish/auth promises to prevent memory leaks
         this.clearPendingPublishes(new Error(`Relay ${this.ndkRelay.url} disconnected`));
 
-        if (this._status === NDKRelayStatus.CONNECTED) {
+        if (this._status >= NDKRelayStatus.CONNECTED) {
             this.handleReconnection();
         }
         this._status = NDKRelayStatus.DISCONNECTED;
+        this.authChallenge = undefined;
         this.ndkRelay.emit("disconnect");
     }
 
@@ -461,6 +469,7 @@ export class NDKRelayConnectivity {
                             const event = this.pendingAuthPublishes.get(id);
                             if (event) {
                                 this.debug("Publish failed due to auth-required, will retry after auth", id);
+                                if (this._status < NDKRelayStatus.AUTHENTICATING) this.authenticate();
                                 // Don't reject yet - keep the resolver for retry after auth
                                 // Put the resolver back so we can resolve/reject it after auth
                                 ep.push(firstEp);
@@ -521,82 +530,102 @@ export class NDKRelayConnectivity {
      *
      * @param challenge - The authentication challenge provided by the NDK relay.
      */
-    private async onAuthRequested(challenge: string) {
-        const authPolicy = this.ndkRelay.authPolicy ?? this.ndk?.relayAuthDefaultPolicy;
+    private onAuthRequested(challenge: string) {
+        this.authChallenge = challenge;
+        const authPolicy = this.authPolicy;
 
-        this.debug("Relay requested authentication", {
-            havePolicy: !!authPolicy,
-        });
+        this.debug("Relay requested authentication", { havePolicy: !!authPolicy });
 
-        if (this._status === NDKRelayStatus.AUTHENTICATING) {
-            this.debug("Already authenticating, ignoring");
+        if (!authPolicy) {
+            this.ndkRelay.emit("auth", challenge);
             return;
         }
 
+        // A new challenge on a connection we already authenticated, or one we are
+        // answering right now, doesn't need another AUTH.
+        if (this._status === NDKRelayStatus.AUTHENTICATED || this.authInFlight) return;
+
         this._status = NDKRelayStatus.AUTH_REQUESTED;
+        this.authenticate();
+    }
 
-        if (authPolicy) {
-            if (this._status >= NDKRelayStatus.CONNECTED) {
-                this._status = NDKRelayStatus.AUTHENTICATING;
-                let res: boolean | NDKEvent | undefined | undefined;
-                try {
-                    res = await authPolicy(this.ndkRelay, challenge);
-                } catch (e) {
-                    this.debug("Authentication policy threw an error", e);
-                    res = false;
-                }
-                this.debug("Authentication policy returned", !!res);
+    private get authPolicy() {
+        return this.ndkRelay.authPolicy ?? this.ndk?.relayAuthDefaultPolicy;
+    }
 
-                if (res instanceof NDKEvent || res === true) {
-                    if (res instanceof NDKEvent) {
-                        await this.auth(res);
-                    }
+    /**
+     * Answers the relay's current NIP-42 challenge with the auth policy.
+     *
+     * Resolves true once the relay accepts the AUTH event (or the connection is
+     * already authenticated), false when there is no challenge or policy, the policy
+     * declines, or the relay rejects it. Concurrent calls share one attempt.
+     */
+    public authenticate(): Promise<boolean> {
+        if (this._status === NDKRelayStatus.AUTHENTICATED) return Promise.resolve(true);
+        if (this.authInFlight) return this.authInFlight;
 
-                    const authenticate = async () => {
-                        if (this._status >= NDKRelayStatus.CONNECTED && this._status < NDKRelayStatus.AUTHENTICATED) {
-                            const event = new NDKEvent(this.ndk);
-                            event.kind = NDKKind.ClientAuth;
-                            event.tags = [
-                                ["relay", this.ndkRelay.url],
-                                ["challenge", challenge],
-                            ];
-                            await event.sign();
-                            this.auth(event)
-                                .then(() => {
-                                    this._status = NDKRelayStatus.AUTHENTICATED;
-                                    this.ndkRelay.emit("authed");
-                                    this.debug("Authentication successful");
-                                    this.retryPendingAuthPublishes();
-                                })
-                                .catch((e) => {
-                                    this._status = NDKRelayStatus.AUTH_REQUESTED;
-                                    this.ndkRelay.emit("auth:failed", e);
-                                    this.debug("Authentication failed", e);
-                                    this.rejectPendingAuthPublishes(e);
-                                });
-                        } else {
-                            this.debug("Authentication failed, it changed status, status is %d", this._status);
-                        }
-                    };
+        const challenge = this.authChallenge;
+        const authPolicy = this.authPolicy;
+        if (!challenge || !authPolicy || !this.connected) return Promise.resolve(false);
 
-                    if (res === true) {
-                        if (!this.ndk?.signer) {
-                            this.debug("No signer available for authentication localhost");
-                            this.ndk?.once("signer:ready", authenticate);
-                        } else {
-                            authenticate().catch((e) => {
-                                console.error("Error authenticating", e);
-                            });
-                        }
-                    }
+        const attempt = this.runAuth(authPolicy, challenge).finally(() => {
+            if (this.authInFlight === attempt) this.authInFlight = undefined;
+        });
+        this.authInFlight = attempt;
+        return attempt;
+    }
 
-                    this._status = NDKRelayStatus.CONNECTED;
-                    this.ndkRelay.emit("authed");
-                }
-            }
-        } else {
-            this.ndkRelay.emit("auth", challenge);
+    private async runAuth(authPolicy: NonNullable<NDKRelay["authPolicy"]>, challenge: string): Promise<boolean> {
+        this._status = NDKRelayStatus.AUTHENTICATING;
+
+        try {
+            let res = await authPolicy(this.ndkRelay, challenge);
+            this.debug("Authentication policy returned", !!res);
+
+            if (res === true) res = await this.signAuthEvent(challenge);
+            if (!(res instanceof NDKEvent)) throw new Error("Authentication declined by policy");
+
+            await this.withAuthTimeout(this.auth(res));
+
+            // the connection changed while we were waiting
+            if (this.authChallenge !== challenge || !this.connected) return false;
+
+            this._status = NDKRelayStatus.AUTHENTICATED;
+            this.debug("Authentication successful");
+            this.ndkRelay.emit("authed");
+            this.retryPendingAuthPublishes();
+            return true;
+        } catch (e) {
+            const error = e instanceof Error ? e : new Error(String(e));
+            if (this._status > NDKRelayStatus.CONNECTED) this._status = NDKRelayStatus.CONNECTED;
+            this.debug("Authentication failed", error);
+            this.ndkRelay.emit("auth:failed", error);
+            this.rejectPendingAuthPublishes(error);
+            return false;
         }
+    }
+
+    private async signAuthEvent(challenge: string): Promise<NDKEvent> {
+        if (!this.ndk?.signer) {
+            this.debug("Waiting for a signer to authenticate");
+            await new Promise((resolve) => this.ndk?.once("signer:ready", resolve));
+        }
+        const event = new NDKEvent(this.ndk);
+        event.kind = NDKKind.ClientAuth;
+        event.tags = [
+            ["relay", this.ndkRelay.url],
+            ["challenge", challenge],
+        ];
+        await event.sign();
+        return event;
+    }
+
+    private withAuthTimeout<T>(p: Promise<T>): Promise<T> {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const timeout = new Promise<never>((_, reject) => {
+            timer = setTimeout(() => reject(new Error("Timed out waiting for AUTH OK")), this.authTimeoutMs);
+        });
+        return Promise.race([p, timeout]).finally(() => clearTimeout(timer));
     }
 
     /**
@@ -862,12 +891,12 @@ export class NDKRelayConnectivity {
         const ret = new Promise<NDKCountResult>((resolve, reject) => {
             this.openCountRequests.set(id, { resolve, reject });
         });
-        this.send(`["COUNT","${id}",${JSON.stringify(filters).substring(1)}`);
+        this.send(JSON.stringify(["COUNT", id, ...filters]));
         return ret;
     }
 
     public close(subId: string, reason?: string): void {
-        this.send(`["CLOSE","${subId}"]`);
+        this.send(JSON.stringify(["CLOSE", subId]));
         const sub = this.openSubs.get(subId);
         this.openSubs.delete(subId);
         if (sub) sub.onclose(reason);
@@ -881,7 +910,12 @@ export class NDKRelayConnectivity {
      * @returns A new NDKRelaySubscription instance.
      */
     public req(relaySub: NDKRelaySubscription): void {
-        `${this.send(`["REQ","${relaySub.subId}",${JSON.stringify(relaySub.executeFilters).substring(1)}`)}]`;
+        // A REQ needs at least one filter; ["REQ","id"] is rejected by relays.
+        if (!relaySub.executeFilters?.length) {
+            this.debug("Not sending a REQ with no filters", relaySub.subId);
+            return;
+        }
+        this.send(JSON.stringify(["REQ", relaySub.subId, ...relaySub.executeFilters]));
         this.openSubs.set(relaySub.subId, relaySub);
     }
 

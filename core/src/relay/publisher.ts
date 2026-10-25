@@ -27,7 +27,7 @@ export class NDKRelayPublisher {
         const publishConnected = () => {
             return new Promise<boolean>((resolve, reject) => {
                 try {
-                    this.publishEvent(event)
+                    this.publishEvent(event, onAuthWait)
                         .then((_result) => {
                             this.ndkRelay.emit("published", event);
                             event.emit("relay:published", this.ndkRelay);
@@ -40,12 +40,23 @@ export class NDKRelayPublisher {
             });
         };
 
-        const timeoutPromise = new Promise<boolean>((_, reject) => {
+        let timeoutReject: (reason?: unknown) => void = () => {};
+        const arm = (ms: number) => {
+            if (timeout) clearTimeout(timeout as NodeJS.Timeout);
             timeout = setTimeout(() => {
                 timeout = undefined;
-                reject(new Error(`Timeout: ${timeoutMs}ms`));
-            }, timeoutMs);
+                timeoutReject(new Error(`Timeout: ${ms}ms`));
+            }, ms);
+        };
+        const timeoutPromise = new Promise<boolean>((_, reject) => {
+            timeoutReject = reject;
+            arm(timeoutMs);
         });
+        // The relay refused it with auth-required and AUTH is under way: a fresh budget covering
+        // AUTH (signing, the relay's OK) and the re-send, which the first one never included.
+        const onAuthWait = () => {
+            if (timeout) arm(timeoutMs + this.ndkRelay.connectivity.authTimeoutMs);
+        };
 
         const onConnectHandler = () => {
             publishConnected()
@@ -97,7 +108,7 @@ export class NDKRelayPublisher {
             .finally(onFinally);
     }
 
-    private async publishEvent(event: NDKEvent): Promise<string> {
-        return this.ndkRelay.connectivity.publish(event.rawEvent());
+    private async publishEvent(event: NDKEvent, onAuthWait?: () => void): Promise<string> {
+        return this.ndkRelay.connectivity.publish(event.rawEvent(), onAuthWait);
     }
 }

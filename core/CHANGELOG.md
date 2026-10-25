@@ -1,5 +1,16 @@
 # @nostr-dev-kit/ndk
 
+## 3.0.3-bzz.7
+
+### Patch Changes
+
+- Auth policies now get a third argument, `reason` (`NDKAuthReason`): `challenge` for an unprompted challenge, `auth-required` after the relay refused a publish or REQ, `manual` for `relay.authenticate()`. A policy can then ignore the challenge many relays send on every connect and sign only when something needs it. Declining a `challenge` is quiet: no `auth:failed`, and the connection stays as it was.
+- Fixes a failed or declined AUTH rejecting every publish in flight on that relay. Only publishes the relay refused with auth-required are rejected now, and only those are re-sent after AUTH.
+- A publish refused with auth-required gets a fresh timeout (`timeoutMs + authTimeoutMs`) covering AUTH and the re-send. Before, both had to fit in the first 2.5s.
+- An auth-required on a connection that is already authenticated, or that has no auth policy, rejects at once instead of running out the timeout.
+- `relay.authenticate()` with no challenge yet answers the challenge as soon as it arrives.
+- Waiting for a signer to sign AUTH is bounded by `authTimeoutMs`.
+
 ## 3.0.3-bzz.6
 
 ### Patch Changes

@@ -1,5 +1,11 @@
 # @nostr-dev-kit/ndk-cache-dexie
 
+## 2.7.8-bzz.2
+
+### Patch Changes
+
+- Published to npm as `@bzzsocial/cache-dexie`. It imports and peer-depends on `@bzzsocial/ndk` instead of `@nostr-dev-kit/ndk`.
+
 ## 2.7.8-bzz.1
 
 ### Patch Changes

@@ -8,6 +8,7 @@ import type { NDKRelay, NDKRelayConnectionStats } from ".";
 import { NDKRelayStatus } from ".";
 import { NDKRelayKeepalive } from "./keepalive";
 import type { NDKRelaySubscription } from "./subscription";
+import type { NDKAuthReason } from "./auth-policies.js";
 
 // Removed MAX_RECONNECT_ATTEMPTS - we retry indefinitely with capped backoff
 const FLAPPING_THRESHOLD_MS = 1000;
@@ -45,13 +46,20 @@ export class NDKRelayConnectivity {
     private openCountRequests = new Map<string, CountResolver>();
     private openEventPublishes = new Map<string, EventPublishResolver[]>();
     private pendingAuthPublishes = new Map<string, NostrEvent>();
+    /** Publishes the relay refused with auth-required, held until this connection authenticates.
+     * Only these are re-sent after AUTH, or rejected when it fails — not every publish in flight. */
+    private authBlocked = new Set<string>();
+    /** Called when a publish starts waiting on AUTH, so its caller can extend its own timeout. */
+    private authWaitHooks = new Map<string, () => void>();
+    /** Something asked to authenticate before the relay sent a challenge, and why. */
+    private authWanted?: NDKAuthReason;
     private serial = 0;
     public baseEoseTimeout = 4_400;
 
     /** The latest NIP-42 challenge on the current connection. */
     public authChallenge?: string;
     private authInFlight?: Promise<boolean>;
-    /** How long to wait for the relay's OK on an AUTH event. */
+    /** How long to wait for the relay's OK on an AUTH event, and for a signer to sign it. */
     public authTimeoutMs = 10_000;
 
     /** Silence after which the keepalive pings the relay. */
@@ -321,6 +329,7 @@ export class NDKRelayConnectivity {
         this.updateConnectionStats.connected();
         this._status = NDKRelayStatus.CONNECTED;
         this.authChallenge = undefined;
+        this.authWanted = undefined;
 
         // disconnect() stops monitoring; a new connection needs it again
         if (!this.wsStateMonitor) this.setupMonitoring();
@@ -361,6 +370,7 @@ export class NDKRelayConnectivity {
         }
         this._status = NDKRelayStatus.DISCONNECTED;
         this.authChallenge = undefined;
+        this.authWanted = undefined;
         this.ndkRelay.emit("disconnect");
     }
 
@@ -457,7 +467,7 @@ export class NDKRelayConnectivity {
                     if (ok) {
                         firstEp.resolve(reason);
                         // Clean up the pending auth publish since it succeeded
-                        this.pendingAuthPublishes.delete(id);
+                        this.forgetPublish(id);
                     } else {
                         // Check if this is an auth-required error
                         // Different relays use different error messages for auth requirements
@@ -470,9 +480,16 @@ export class NDKRelayConnectivity {
                         if (isAuthRequired) {
                             // Get the pending event from pendingAuthPublishes
                             const event = this.pendingAuthPublishes.get(id);
-                            if (event) {
+                            // Already authenticated (we are simply not allowed) or no policy to
+                            // answer with: waiting would only end in the caller's timeout.
+                            const canAuth = !!this.authPolicy && this._status !== NDKRelayStatus.AUTHENTICATED;
+                            if (event && canAuth) {
                                 this.debug("Publish failed due to auth-required, will retry after auth", id);
-                                if (this._status < NDKRelayStatus.AUTHENTICATING) this.authenticate();
+                                this.authBlocked.add(id);
+                                // The caller's publish timeout restarts: AUTH (signing, the relay's
+                                // OK) and the re-send are a second round trip it did not budget for.
+                                this.authWaitHooks.get(id)?.();
+                                if (this._status < NDKRelayStatus.AUTHENTICATING) this.authenticate("auth-required");
                                 // Don't reject yet - keep the resolver for retry after auth
                                 // Put the resolver back so we can resolve/reject it after auth
                                 ep.push(firstEp);
@@ -480,11 +497,12 @@ export class NDKRelayConnectivity {
                             } else {
                                 // Event not found in pending, reject normally
                                 firstEp.reject(new Error(reason));
+                                this.forgetPublish(id);
                             }
                         } else {
                             firstEp.reject(new Error(reason));
                             // Clean up the pending auth publish for non-auth errors
-                            this.pendingAuthPublishes.delete(id);
+                            this.forgetPublish(id);
                         }
                     }
 
@@ -548,8 +566,13 @@ export class NDKRelayConnectivity {
         // answering right now, doesn't need another AUTH.
         if (this._status === NDKRelayStatus.AUTHENTICATED || this.authInFlight) return;
 
+        // A challenge on its own is an offer (many relays send one on every connect). The policy
+        // is told so, and may decline it quietly; one that arrives after something was refused
+        // with auth-required — or after authenticate() found no challenge — is a need.
+        const reason: NDKAuthReason = this.authBlocked.size > 0 ? "auth-required" : (this.authWanted ?? "challenge");
+        this.authWanted = undefined;
         this._status = NDKRelayStatus.AUTH_REQUESTED;
-        this.authenticate();
+        this.authenticate(reason);
     }
 
     private get authPolicy() {
@@ -563,27 +586,41 @@ export class NDKRelayConnectivity {
      * already authenticated), false when there is no challenge or policy, the policy
      * declines, or the relay rejects it. Concurrent calls share one attempt.
      */
-    public authenticate(): Promise<boolean> {
+    public authenticate(reason: NDKAuthReason = "manual"): Promise<boolean> {
         if (this._status === NDKRelayStatus.AUTHENTICATED) return Promise.resolve(true);
         if (this.authInFlight) return this.authInFlight;
 
         const challenge = this.authChallenge;
         const authPolicy = this.authPolicy;
-        if (!challenge || !authPolicy || !this.connected) return Promise.resolve(false);
+        if (!challenge || !authPolicy || !this.connected) {
+            // No challenge yet: answer it as a need when it comes, rather than as an offer.
+            if (!challenge && authPolicy && this.connected && reason !== "challenge") this.authWanted = reason;
+            return Promise.resolve(false);
+        }
 
-        const attempt = this.runAuth(authPolicy, challenge).finally(() => {
+        const attempt = this.runAuth(authPolicy, challenge, reason).finally(() => {
             if (this.authInFlight === attempt) this.authInFlight = undefined;
         });
         this.authInFlight = attempt;
         return attempt;
     }
 
-    private async runAuth(authPolicy: NonNullable<NDKRelay["authPolicy"]>, challenge: string): Promise<boolean> {
+    private async runAuth(
+        authPolicy: NonNullable<NDKRelay["authPolicy"]>,
+        challenge: string,
+        reason: NDKAuthReason,
+    ): Promise<boolean> {
         this._status = NDKRelayStatus.AUTHENTICATING;
 
         try {
-            let res = await authPolicy(this.ndkRelay, challenge);
-            this.debug("Authentication policy returned", !!res);
+            let res = await authPolicy(this.ndkRelay, challenge, reason);
+            this.debug("Authentication policy returned", !!res, reason);
+
+            // Declining an offer is not a failure: nothing was refused, nothing is waiting on it.
+            if (!res && reason === "challenge" && this.authBlocked.size === 0) {
+                if (this._status > NDKRelayStatus.CONNECTED) this._status = NDKRelayStatus.CONNECTED;
+                return false;
+            }
 
             if (res === true) res = await this.signAuthEvent(challenge);
             if (!(res instanceof NDKEvent)) throw new Error("Authentication declined by policy");
@@ -611,7 +648,17 @@ export class NDKRelayConnectivity {
     private async signAuthEvent(challenge: string): Promise<NDKEvent> {
         if (!this.ndk?.signer) {
             this.debug("Waiting for a signer to authenticate");
-            await new Promise((resolve) => this.ndk?.once("signer:ready", resolve));
+            // Bounded: a signer that never arrives is a declined AUTH, not a publish held forever.
+            let timer: ReturnType<typeof setTimeout> | undefined;
+            let onReady: (() => void) | undefined;
+            await new Promise<void>((resolve, reject) => {
+                onReady = () => resolve();
+                this.ndk?.once("signer:ready", onReady);
+                timer = setTimeout(() => reject(new Error("No signer to authenticate with")), this.authTimeoutMs);
+            }).finally(() => {
+                clearTimeout(timer);
+                if (onReady) this.ndk?.off("signer:ready", onReady);
+            });
         }
         const event = new NDKEvent(this.ndk);
         event.kind = NDKKind.ClientAuth;
@@ -808,6 +855,8 @@ export class NDKRelayConnectivity {
             }
             this.openEventPublishes.delete(eventId);
         }
+        this.pendingAuthPublishes.clear();
+        this.authWaitHooks.clear();
     }
 
     /**
@@ -815,18 +864,20 @@ export class NDKRelayConnectivity {
      * Called after successful authentication.
      */
     private retryPendingAuthPublishes(): void {
-        if (this.pendingAuthPublishes.size === 0) return;
+        if (this.authBlocked.size === 0) return;
 
-        this.debug(`Retrying ${this.pendingAuthPublishes.size} pending publishes after auth`);
+        this.debug(`Retrying ${this.authBlocked.size} pending publishes after auth`);
 
-        for (const [eventId, event] of this.pendingAuthPublishes.entries()) {
+        // Only the ones the relay refused: a publish still waiting on its first OK was not refused
+        // and re-sending it would only make a duplicate. The re-sent ones stay in
+        // pendingAuthPublishes until their OK, like any publish.
+        for (const eventId of this.authBlocked) {
+            const event = this.pendingAuthPublishes.get(eventId);
+            if (!event) continue;
             this.debug(`Retrying publish for event ${eventId}`);
-            // Resend the event
             this.send(`["EVENT",${JSON.stringify(event)}]`);
         }
-
-        // Clear the pending publishes - they're now back in openEventPublishes waiting for OK
-        this.pendingAuthPublishes.clear();
+        this.authBlocked.clear();
     }
 
     /**
@@ -834,11 +885,13 @@ export class NDKRelayConnectivity {
      * Called when authentication fails.
      */
     private rejectPendingAuthPublishes(error: Error): void {
-        if (this.pendingAuthPublishes.size === 0) return;
+        if (this.authBlocked.size === 0) return;
 
-        this.debug(`Rejecting ${this.pendingAuthPublishes.size} pending publishes due to auth failure`);
+        this.debug(`Rejecting ${this.authBlocked.size} pending publishes due to auth failure`);
 
-        for (const [eventId] of this.pendingAuthPublishes.entries()) {
+        // Only the ones waiting on AUTH: a failed or declined AUTH says nothing about a publish
+        // the relay has not refused, and that one gets its own OK.
+        for (const eventId of [...this.authBlocked]) {
             const ep = this.openEventPublishes.get(eventId);
             if (ep && ep.length > 0) {
                 const resolver = ep.pop();
@@ -850,9 +903,14 @@ export class NDKRelayConnectivity {
                     this.openEventPublishes.delete(eventId);
                 }
             }
+            this.forgetPublish(eventId);
         }
+    }
 
-        this.pendingAuthPublishes.clear();
+    private forgetPublish(eventId: string): void {
+        this.pendingAuthPublishes.delete(eventId);
+        this.authBlocked.delete(eventId);
+        this.authWaitHooks.delete(eventId);
     }
 
     /**
@@ -862,7 +920,7 @@ export class NDKRelayConnectivity {
      * @returns A promise that resolves with the result of the event publication.
      * @throws {Error} If attempting to publish on a closed relay connection.
      */
-    async publish(event: NostrEvent): Promise<string> {
+    async publish(event: NostrEvent, onAuthWait?: () => void): Promise<string> {
         const ret = new Promise<string>((resolve, reject) => {
             const val = this.openEventPublishes.get(event.id!) ?? [];
             if (val.length > 0) {
@@ -875,6 +933,7 @@ export class NDKRelayConnectivity {
 
         // Store the event in case we need to retry after auth
         this.pendingAuthPublishes.set(event.id!, event);
+        if (onAuthWait) this.authWaitHooks.set(event.id!, onAuthWait);
 
         this.send(`["EVENT",${JSON.stringify(event)}]`);
         return ret;

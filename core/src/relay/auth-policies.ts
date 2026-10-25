@@ -7,13 +7,29 @@ import type { NDKRelay } from ".";
 import type { NDKPool } from "./pool/index.js";
 
 /**
+ * Why a policy is being asked to authenticate.
+ *
+ * - `challenge`: the relay sent an AUTH challenge and nothing is waiting on it. Many relays send
+ *   one on every connection as an offer; declining it is quiet and leaves the connection as is.
+ * - `auth-required`: the relay refused a publish or a REQ with `auth-required:` — answering is
+ *   the only way that publish or REQ gets through.
+ * - `manual`: the application called `relay.authenticate()`.
+ */
+type NDKAuthReason = "challenge" | "auth-required" | "manual";
+
+/**
  * NDKAuthPolicies are functions that are called when a relay requests authentication
  * so that you can define a behavior for your application.
  *
  * @param relay The relay that requested authentication.
  * @param challenge The challenge that the relay sent.
+ * @param reason Why authentication is being asked for. See NDKAuthReason.
  */
-type NDKAuthPolicy = (relay: NDKRelay, challenge: string) => Promise<boolean | undefined | NDKEvent>;
+type NDKAuthPolicy = (
+    relay: NDKRelay,
+    challenge: string,
+    reason?: NDKAuthReason,
+) => Promise<boolean | undefined | NDKEvent>;
 
 /**
  * This policy will disconnect from relays that request authentication.
@@ -90,4 +106,4 @@ const NDKRelayAuthPolicies = {
     signIn,
 };
 
-export { NDKRelayAuthPolicies, type NDKAuthPolicy };
+export { NDKRelayAuthPolicies, type NDKAuthPolicy, type NDKAuthReason };

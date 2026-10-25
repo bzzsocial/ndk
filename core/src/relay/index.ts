@@ -6,7 +6,7 @@ import type { NDK } from "../ndk/index.js";
 import type { NDKFilter, NDKSubscription } from "../subscription/index.js";
 import type { NDKUser } from "../user/index.js";
 import { normalizeRelayUrl } from "../utils/normalize-url.js";
-import type { NDKAuthPolicy } from "./auth-policies.js";
+import type { NDKAuthPolicy, NDKAuthReason } from "./auth-policies.js";
 import { NDKRelayConnectivity } from "./connectivity.js";
 import { fetchRelayInformation, type NDKRelayInformation } from "./nip11.js";
 import { NDKRelayPublisher } from "./publisher.js";
@@ -231,9 +231,12 @@ export class NDKRelay extends EventEmitter<{
     /**
      * Answers the relay's NIP-42 challenge with this relay's auth policy (or the
      * NDK default). Resolves true once the relay accepts, false otherwise.
+     *
+     * With no challenge on the connection yet, the one that comes is answered as soon as it
+     * arrives (the policy sees `reason` rather than an unprompted `challenge`).
      */
-    public authenticate(): Promise<boolean> {
-        return this.connectivity.authenticate();
+    public authenticate(reason: NDKAuthReason = "manual"): Promise<boolean> {
+        return this.connectivity.authenticate(reason);
     }
 
     /**

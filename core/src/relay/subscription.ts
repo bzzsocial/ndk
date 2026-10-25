@@ -496,7 +496,7 @@ export class NDKRelaySubscription {
             this.authRetried = true;
             this.relay.off("authed", this.reExecuteAfterAuth);
             this.relay.once("authed", this.reExecuteAfterAuth);
-            this.relay.authenticate().then((ok) => {
+            this.relay.authenticate("auth-required").then((ok) => {
                 if (!ok) this.closedByRelay(reason);
             });
             return;

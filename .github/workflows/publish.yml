@@ -1,0 +1,57 @@
+# Publishes @bzzsocial/ndk and @bzzsocial/cache-dexie to npm and creates a
+# GitHub release per new version. A version bump merged into `bzz` releases;
+# versions already on npm are skipped, so re-runs are safe. Pull requests
+# that touch the release path get a dry run.
+name: Publish
+
+on:
+  push:
+    branches: [bzz]
+    paths:
+      - core/package.json
+      - cache-dexie/package.json
+  pull_request:
+    branches: [bzz]
+    paths:
+      - core/**
+      - cache-dexie/**
+      - justfile
+      - .github/workflows/publish.yml
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: dry runs `npm publish --dry-run`; run publishes and releases
+        type: choice
+        options: [dry, run]
+        default: dry
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      MODE: ${{ github.event_name == 'push' && 'run' || github.event_name == 'pull_request' && 'dry' || inputs.mode }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - run: bun install
+      - run: just publish "$MODE"
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - if: env.MODE == 'run'
+        run: just release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}

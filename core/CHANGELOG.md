@@ -2,14 +2,16 @@
 
 ## 3.0.3-bzz.7
 
+Auth policies can now sign AUTH only when a relay needs it, and a failed AUTH no longer fails unrelated publishes.
+
 ### Patch Changes
 
-- Auth policies now get a third argument, `reason` (`NDKAuthReason`): `challenge` for an unprompted challenge, `auth-required` after the relay refused a publish or REQ, `manual` for `relay.authenticate()`. A policy can then ignore the challenge many relays send on every connect and sign only when something needs it. Declining a `challenge` is quiet: no `auth:failed`, and the connection stays as it was.
-- Fixes a failed or declined AUTH rejecting every publish in flight on that relay. Only publishes the relay refused with auth-required are rejected now, and only those are re-sent after AUTH.
-- A publish refused with auth-required gets a fresh timeout (`timeoutMs + authTimeoutMs`) covering AUTH and the re-send. Before, both had to fit in the first 2.5s.
-- An auth-required on a connection that is already authenticated, or that has no auth policy, rejects at once instead of running out the timeout.
-- `relay.authenticate()` with no challenge yet answers the challenge as soon as it arrives.
-- Waiting for a signer to sign AUTH is bounded by `authTimeoutMs`.
+- Adds a `reason` argument (`challenge`, `auth-required` or `manual`) to auth policies. A policy can ignore the challenge relays send on every connect and sign only when a publish or REQ needs it. (c7fba954)
+- Fixes a failed or declined AUTH rejecting every publish in flight on that relay. Only the publishes the relay refused with auth-required are rejected, and only those are re-sent after AUTH. (c7fba954)
+- Gives a publish refused with auth-required a fresh timeout covering AUTH and the re-send. Before, both had to fit in the first 2.5s. (c7fba954)
+- Rejects auth-required at once on a connection that is already authenticated or has no auth policy, instead of waiting out the timeout. (c7fba954)
+- Answers the challenge as soon as it arrives when `relay.authenticate()` is called before one. (c7fba954)
+- Bounds the wait for a signer to sign AUTH by `authTimeoutMs`. (c7fba954)
 
 ## 3.0.3-bzz.6
 

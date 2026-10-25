@@ -6,7 +6,7 @@ First release on npm as `@bzzsocial/cache-dexie`.
 
 ### Patch Changes
 
-- Imports and peer-depends on `@bzzsocial/ndk` instead of `@nostr-dev-kit/ndk`, so apps install the fork directly. (dd8a1a8e)
+- Imports and peer-depends on `@bzzsocial/ndk` instead of `@nostr-dev-kit/ndk`, so apps install the fork directly. (aa0f8e27)
 
 ## 2.7.8-bzz.1
 

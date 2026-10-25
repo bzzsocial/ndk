@@ -6,12 +6,12 @@ Auth policies can now sign AUTH only when a relay needs it, and a failed AUTH no
 
 ### Patch Changes
 
-- Adds a `reason` argument (`challenge`, `auth-required` or `manual`) to auth policies. A policy can ignore the challenge relays send on every connect and sign only when a publish or REQ needs it. (c7fba954)
-- Fixes a failed or declined AUTH rejecting every publish in flight on that relay. Only the publishes the relay refused with auth-required are rejected, and only those are re-sent after AUTH. (c7fba954)
-- Gives a publish refused with auth-required a fresh timeout covering AUTH and the re-send. Before, both had to fit in the first 2.5s. (c7fba954)
-- Rejects auth-required at once on a connection that is already authenticated or has no auth policy, instead of waiting out the timeout. (c7fba954)
-- Answers the challenge as soon as it arrives when `relay.authenticate()` is called before one. (c7fba954)
-- Bounds the wait for a signer to sign AUTH by `authTimeoutMs`. (c7fba954)
+- Adds a `reason` argument (`challenge`, `auth-required` or `manual`) to auth policies. A policy can ignore the challenge relays send on every connect and sign only when a publish or REQ needs it. (b21cb382)
+- Fixes a failed or declined AUTH rejecting every publish in flight on that relay. Only the publishes the relay refused with auth-required are rejected, and only those are re-sent after AUTH. (b21cb382)
+- Gives a publish refused with auth-required a fresh timeout covering AUTH and the re-send. Before, both had to fit in the first 2.5s. (b21cb382)
+- Rejects auth-required at once on a connection that is already authenticated or has no auth policy, instead of waiting out the timeout. (b21cb382)
+- Answers the challenge as soon as it arrives when `relay.authenticate()` is called before one. (b21cb382)
+- Bounds the wait for a signer to sign AUTH by `authTimeoutMs`. (b21cb382)
 
 ## 3.0.3-bzz.6
 

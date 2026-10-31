@@ -85,6 +85,7 @@ export interface NDKRelayConnectionStats {
  * @emits NDKRelay#eose when the relay has reached the end of stored events
  * @emits NDKRelay#auth when the relay requires authentication
  * @emits NDKRelay#authed when the relay has authenticated
+ * @emits NDKRelay#auth:settled when an AUTH attempt ends, whichever way (true: signed in)
  * @emits NDKRelay#delayed-connect when the relay will wait before reconnecting
  */
 export class NDKRelay extends EventEmitter<{
@@ -100,6 +101,7 @@ export class NDKRelay extends EventEmitter<{
     auth: (challenge: string) => void;
     authed: () => void;
     "auth:failed": (error: Error) => void;
+    "auth:settled": (authed: boolean) => void;
     published: (event: NDKEvent) => void;
     "publish:failed": (event: NDKEvent, error: Error) => void;
     "delayed-connect": (delayInMs: number) => void;
@@ -226,6 +228,14 @@ export class NDKRelay extends EventEmitter<{
      */
     get authChallenge(): string | undefined {
         return this.connectivity.authChallenge;
+    }
+
+    /**
+     * The pubkey the current connection is signed in as (NIP-42), if it is. Cleared when the
+     * connection closes: a new one signs in afresh.
+     */
+    get authedAs(): string | undefined {
+        return this.connectivity.authedAs;
     }
 
     /**

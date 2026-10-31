@@ -194,4 +194,31 @@ describe("AUTH on demand", () => {
         await vi.waitFor(() => expect(failed).toHaveBeenCalled());
         expect(relay.status).toBe(NDKRelayStatus.CONNECTED);
     });
+
+    it("settles every attempt, a quietly declined offer included", async () => {
+        const { policy } = onDemandPolicy();
+        const r = connectedRelay(policy);
+        const settled = vi.fn();
+        r.relay.on("auth:settled", settled);
+
+        r.recv(["AUTH", "c1"]);
+        await tick();
+        expect(settled.mock.lastCall?.[0]).toBe(false);
+
+        const authed = r.relay.authenticate("manual");
+        await acceptAuth(r);
+        await expect(authed).resolves.toBe(true);
+        expect(settled.mock.lastCall?.[0]).toBe(true);
+        expect(settled).toHaveBeenCalledTimes(2);
+    });
+
+    it("records whom the connection signed in as, until it closes", async () => {
+        const r = connectedRelay(async () => true);
+        r.recv(["AUTH", "c1"]);
+        await acceptAuth(r);
+        expect(r.relay.authedAs).toBe((await r.ndk.signer!.user()).pubkey);
+
+        (r.relay.connectivity as any).onDisconnect();
+        expect(r.relay.authedAs).toBeUndefined();
+    });
 });

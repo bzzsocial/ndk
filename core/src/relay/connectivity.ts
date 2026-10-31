@@ -58,6 +58,8 @@ export class NDKRelayConnectivity {
 
     /** The latest NIP-42 challenge on the current connection. */
     public authChallenge?: string;
+    /** The pubkey this connection is signed in as (NIP-42), until the connection closes. */
+    public authedAs?: string;
     private authInFlight?: Promise<boolean>;
     /** How long to wait for the relay's OK on an AUTH event, and for a signer to sign it. */
     public authTimeoutMs = 10_000;
@@ -329,6 +331,7 @@ export class NDKRelayConnectivity {
         this.updateConnectionStats.connected();
         this._status = NDKRelayStatus.CONNECTED;
         this.authChallenge = undefined;
+        this.authedAs = undefined;
         this.authWanted = undefined;
 
         // disconnect() stops monitoring; a new connection needs it again
@@ -370,6 +373,7 @@ export class NDKRelayConnectivity {
         }
         this._status = NDKRelayStatus.DISCONNECTED;
         this.authChallenge = undefined;
+        this.authedAs = undefined;
         this.authWanted = undefined;
         this.ndkRelay.emit("disconnect");
     }
@@ -610,6 +614,18 @@ export class NDKRelayConnectivity {
         challenge: string,
         reason: NDKAuthReason,
     ): Promise<boolean> {
+        const authed = await this.attemptAuth(authPolicy, challenge, reason);
+        // Every attempt ends here, however it ended (a quietly declined offer and a connection
+        // that changed underneath included), for whoever waits on the outcome.
+        this.ndkRelay.emit("auth:settled", authed);
+        return authed;
+    }
+
+    private async attemptAuth(
+        authPolicy: NonNullable<NDKRelay["authPolicy"]>,
+        challenge: string,
+        reason: NDKAuthReason,
+    ): Promise<boolean> {
         this._status = NDKRelayStatus.AUTHENTICATING;
 
         try {
@@ -631,6 +647,7 @@ export class NDKRelayConnectivity {
             if (this.authChallenge !== challenge || !this.connected) return false;
 
             this._status = NDKRelayStatus.AUTHENTICATED;
+            this.authedAs = res.pubkey;
             this.debug("Authentication successful");
             this.ndkRelay.emit("authed");
             this.retryPendingAuthPublishes();

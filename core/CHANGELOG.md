@@ -1,5 +1,14 @@
 # @nostr-dev-kit/ndk
 
+## 3.0.3-bzz.8
+
+A relay connection now says whom it signed in as, and when each AUTH attempt is over.
+
+### Patch Changes
+
+- Adds `relay.authedAs`: the pubkey the current connection is signed in as (NIP-42), cleared when the connection closes.
+- Adds an `auth:settled` relay event, emitted when any AUTH attempt ends (`true` when signed in). It also fires when an offer is declined or the connection changes during AUTH, which emit no other event.
+
 ## 3.0.3-bzz.7
 
 Auth policies can now sign AUTH only when a relay needs it, and a failed AUTH no longer fails unrelated publishes.

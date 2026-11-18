@@ -1,5 +1,14 @@
 # @nostr-dev-kit/ndk
 
+## 3.0.3-bzz.9
+
+Gift wraps can be stamped close to now, for relays that reject events far from their clock.
+
+### Patch Changes
+
+- Adds a `maxBackdate` option to `giftWrap()`: the most seconds the seal's and wrap's `created_at` may be backdated. The default stays at ~28h (NIP-59's timing blur); `0` stamps both at now. (f8794487)
+- Fixes a seal or wrap occasionally being stamped up to a second in the future. (f8794487)
+
 ## 3.0.3-bzz.8
 
 A relay connection now says whom it signed in as, and when each AUTH attempt is over.

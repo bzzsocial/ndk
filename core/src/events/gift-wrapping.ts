@@ -10,6 +10,12 @@ export type GiftWrapParams = {
     scheme?: NDKEncryptionScheme;
     rumorKind?: number;
     wrapTags?: string[][];
+    /**
+     * Upper bound, in seconds, on how far the seal's and wrap's `created_at` are backdated from
+     * now (NIP-59's timing blur). Defaults to ~28h. Lower it for relays that reject events far
+     * from their clock. 0 stamps both at now; never stamped in the future.
+     */
+    maxBackdate?: number;
 };
 
 /**
@@ -23,7 +29,7 @@ export type GiftWrapParams = {
  * @param event - The rumor event to wrap (will auto-set pubkey if missing)
  * @param recipient - The recipient's NDKUser
  * @param signer - The signer (defaults to event.ndk.signer)
- * @param params - Optional parameters (scheme, rumorKind, wrapTags)
+ * @param params - Optional parameters (scheme, rumorKind, wrapTags, maxBackdate)
  * @returns The gift-wrapped event (kind 1059)
  */
 export async function giftWrap(
@@ -56,7 +62,7 @@ export async function giftWrap(
     }
 
     const rumor = getRumorEvent(event, params?.rumorKind);
-    const seal = await getSealEvent(rumor, recipient, _signer, params.scheme);
+    const seal = await getSealEvent(rumor, recipient, _signer, params.scheme, params.maxBackdate);
     const wrap = await getWrapEvent(seal, recipient, params);
     return new NDKEvent(event.ndk, wrap);
 }
@@ -121,10 +127,11 @@ async function getSealEvent(
     recipient: NDKUser,
     signer: NDKSigner,
     scheme: NDKEncryptionScheme = "nip44",
+    maxBackdate?: number,
 ): Promise<NDKEvent> {
     const seal = new NDKEvent(rumor.ndk);
     seal.kind = NDKKind.GiftWrapSeal;
-    seal.created_at = approximateNow(5);
+    seal.created_at = approximateNow(maxBackdate);
     seal.content = JSON.stringify(rumor.rawEvent());
     await seal.encrypt(recipient, signer, scheme);
     await seal.sign(signer);
@@ -141,7 +148,7 @@ async function getWrapEvent(
 
     const wrap = new NDKEvent(sealed.ndk);
     wrap.kind = NDKKind.GiftWrap;
-    wrap.created_at = approximateNow(5);
+    wrap.created_at = approximateNow(params?.maxBackdate);
     if (params?.wrapTags) wrap.tags = params.wrapTags;
     wrap.tag(recipient);
     wrap.content = JSON.stringify(sealed.rawEvent());
@@ -150,6 +157,8 @@ async function getWrapEvent(
     return wrap;
 }
 
-function approximateNow(drift = 0) {
-    return Math.round(Date.now() / 1000 - Math.random() * 10 ** drift);
+const DEFAULT_MAX_BACKDATE = 10 ** 5;
+
+function approximateNow(maxBackdate = DEFAULT_MAX_BACKDATE) {
+    return Math.floor(Date.now() / 1000 - Math.random() * Math.max(0, maxBackdate));
 }

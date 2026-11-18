@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import type { NDKCacheAdapter } from "../cache";
 import { NDK } from "../ndk";
 import { NDKPrivateKeySigner } from "../signers/private-key";
+import { NDKUser } from "../user/index.js";
 import { giftUnwrap, giftWrap } from "./gift-wrapping.js";
 import { NDKEvent } from "./index.js";
 import { NDKKind } from "./kinds";
@@ -135,5 +136,56 @@ describe("NIP-17 Gift Wrapping Cache", () => {
         // Should not throw, just skip caching
         const unwrapped = await giftUnwrap(wrapped, undefined, bobSigner);
         expect(unwrapped.content).toBe("Message without cache");
+    });
+});
+
+describe("giftWrap maxBackdate", () => {
+    it("stamps seal and wrap within maxBackdate of now, never ahead", async () => {
+        const ndk = new NDK({});
+        const alice = NDKPrivateKeySigner.generate();
+        const bobSigner = NDKPrivateKeySigner.generate();
+        const bob = await bobSigner.user();
+        const maxBackdate = 600;
+
+        for (let i = 0; i < 20; i++) {
+            const rumor = new NDKEvent(ndk);
+            rumor.kind = NDKKind.PrivateDirectMessage;
+            rumor.content = `hi ${i}`;
+            rumor.created_at = 1_700_000_000;
+            rumor.tags = [["p", bob.pubkey]];
+
+            const before = Math.floor(Date.now() / 1000);
+            const wrapped = await giftWrap(rumor, bob, alice, { maxBackdate });
+            const after = Math.floor(Date.now() / 1000);
+
+            expect(wrapped.created_at).toBeLessThanOrEqual(after);
+            expect(wrapped.created_at).toBeGreaterThanOrEqual(before - maxBackdate);
+
+            const seal = JSON.parse(
+                await bobSigner.decrypt(new NDKUser({ pubkey: wrapped.pubkey }), wrapped.content, "nip44"),
+            );
+            expect(seal.created_at).toBeLessThanOrEqual(after);
+            expect(seal.created_at).toBeGreaterThanOrEqual(before - maxBackdate);
+
+            const unwrapped = await giftUnwrap(wrapped, undefined, bobSigner);
+            expect(unwrapped.content).toBe(`hi ${i}`);
+            expect(unwrapped.created_at).toBe(1_700_000_000);
+        }
+    });
+
+    it("keeps the default ~28h backdate when maxBackdate is not given", async () => {
+        const ndk = new NDK({});
+        const alice = NDKPrivateKeySigner.generate();
+        const bob = await NDKPrivateKeySigner.generate().user();
+        const rumor = new NDKEvent(ndk);
+        rumor.kind = NDKKind.PrivateDirectMessage;
+        rumor.content = "x";
+        rumor.created_at = Math.floor(Date.now() / 1000);
+        rumor.tags = [["p", bob.pubkey]];
+
+        const before = Math.floor(Date.now() / 1000);
+        const wrapped = await giftWrap(rumor, bob, alice);
+        expect(wrapped.created_at).toBeLessThanOrEqual(before + 1);
+        expect(wrapped.created_at).toBeGreaterThanOrEqual(before - 10 ** 5);
     });
 });
